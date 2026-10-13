@@ -6,6 +6,8 @@ import {
   resolveEarlyPaneSpawnReservationKey
 } from './spawn-begin'
 import { releaseStoppedPaneBinding, stopReplacedPaneOwner } from '../pane/pane-owner-replacement'
+import { planPaneAgentLaunch } from './spawn-agent-launch'
+import { endPaneAgentLaunch } from './spawn-agent-launch-end'
 import { preparePtyIpcSpawnPreflight } from './spawn-preflight'
 import { assemblePtyIpcSpawnEnv } from './spawn-env'
 import { preparePtyIpcQoderCommand } from './spawn-qoder-command'
@@ -60,6 +62,7 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
     if (early) {
       return early
     }
+    await planPaneAgentLaunch(ctx)
     await preparePtyIpcSpawnPreflight(ctx)
     await assemblePtyIpcSpawnEnv(ctx)
     await preparePtyIpcQoderCommand(ctx)
@@ -73,11 +76,21 @@ export async function runPtyIpcSpawn(deps: PtySpawnIpcDeps, args: PtySpawnIpcArg
       // evict the team env assembly created for it — exit/close cleanup keys
       // off handleByPtyId — so every lost race would leak one team forever.
       releaseAbandonedAgentTeamsLeader(ctx)
+      // Another spawn of this pane won it, and nothing of this launch was dispatched.
+      endPaneAgentLaunch(ctx, { error: new Error('agent_launch_pane_already_live') })
       return earlyReserved
     }
+    // Right before the provider spawn, with nothing awaited in between: a closed pane starts nothing.
+    ctx.paneAgentLaunch?.refuseIfClosed()
     await executePtyIpcSpawn(ctx)
-    return await commitPtyIpcSpawn(ctx)
-  } catch (err) {
+    const committed = await commitPtyIpcSpawn(ctx)
+    endPaneAgentLaunch(
+      ctx,
+      ctx.exitedBeforeRegistration ? { exitedDuringStart: true } : { started: true }
+    )
+    return committed
+  } catch (caught) {
+    const err = endPaneAgentLaunch(ctx, { error: caught }) ?? caught
     releaseAbandonedAgentTeamsLeader(ctx)
     if (ctx.preSpawnHiddenMarkId !== null) {
       ctx.deps.transitionSpawnHiddenRendererPtyDeliveryState(ctx.preSpawnHiddenMarkId, false)

@@ -4,7 +4,10 @@ import type { TerminalWorkspaceLaunchScope } from './runtime-legacy-worker-termi
 import type { TerminalCreateOptions } from './runtime-terminal-contracts'
 import { isTuiAgentEnabled } from '../../shared/tui-agent-selection'
 import { resolveBareAgentLaunchCommand } from './runtime-agent-launch-resolution'
-import { planExecutionHostStartupWithPromptCandidate } from '../opencode/opencode-model-startup-plan'
+import {
+  buildExecutionHostAgentStartupPlan,
+  planExecutionHostStartupWithPromptCandidate
+} from '../opencode/opencode-model-startup-plan'
 import { agentPromptRidesLaunchCommand } from '../../shared/tui-agent-startup'
 import {
   launchHostProvesAgentInFront,
@@ -45,31 +48,46 @@ export async function buildRuntimeAgentTerminalStartupOptions(
   if (opts.startupPrompt && !agentPromptRidesLaunchCommand(agent)) {
     throw new Error(`Agent ${agent} does not take a startup prompt on its launch command.`)
   }
-  const { plan: startupPlan, promptCarried } = await planExecutionHostStartupWithPromptCandidate({
-    inputs: resolveAgentStartupPlanInputs({
-      agent,
-      settings,
-      platform,
-      isRemote,
-      ...(opts.agentArgs !== undefined ? { agentArgs: opts.agentArgs } : {}),
-      // A requested shell is the one this PTY will actually be, so it owns the quoting family.
-      windowsShellOverride: opts.shellOverride,
-      sessionOptions: sessionOptions
-    }),
-    prompt: opts.startupPrompt ?? '',
-    cwd: resolveTerminalStartupCwd(workspace.path, opts.cwd) ?? workspace.path,
-    hostIdentity,
-    host: {
-      shellName: nameLocalTypedLineShell({
-        isRemote,
-        ...(opts.shellOverride ? { shellOverride: opts.shellOverride } : {}),
-        ...(settings.terminalDefaultShell
-          ? { defaultShellSetting: settings.terminalDefaultShell }
-          : {})
-      }),
-      provesAgentInFront: launchHostProvesAgentInFront({ isRemote, launchPlatform: platform })
-    }
+  const inputs = resolveAgentStartupPlanInputs({
+    agent,
+    settings,
+    platform,
+    isRemote,
+    ...(opts.agentArgs !== undefined ? { agentArgs: opts.agentArgs } : {}),
+    // A requested shell is the one this PTY will actually be, so it owns the quoting family.
+    windowsShellOverride: opts.shellOverride,
+    sessionOptions: sessionOptions
   })
+  const cwd = resolveTerminalStartupCwd(workspace.path, opts.cwd) ?? workspace.path
+  const prompt = opts.startupPrompt ?? ''
+  // A delivery the caller fixed is kept, with the model draft refusal, as the OpenCode model tab had.
+  const { plan: startupPlan, promptCarried } = opts.startupPromptDelivery
+    ? {
+        plan: await buildExecutionHostAgentStartupPlan({
+          inputs,
+          cwd,
+          prompt,
+          promptDelivery: opts.startupPromptDelivery,
+          hostIdentity
+        }),
+        promptCarried: true
+      }
+    : await planExecutionHostStartupWithPromptCandidate({
+        inputs,
+        prompt,
+        cwd,
+        hostIdentity,
+        host: {
+          shellName: nameLocalTypedLineShell({
+            isRemote,
+            ...(opts.shellOverride ? { shellOverride: opts.shellOverride } : {}),
+            ...(settings.terminalDefaultShell
+              ? { defaultShellSetting: settings.terminalDefaultShell }
+              : {})
+          }),
+          provesAgentInFront: launchHostProvesAgentInFront({ isRemote, launchPlatform: platform })
+        }
+      })
   if (!startupPlan) {
     // Why: an explicit agent that yields no plan would otherwise spawn a bare
     // shell that never reaches agent readiness.

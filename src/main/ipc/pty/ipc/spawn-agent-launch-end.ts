@@ -1,0 +1,90 @@
+/**
+ * How a pane's own agent launch ends, on every exit of its spawn: the running launch is finished
+ * and, for a pane that shows a notice, its verdict reported, whatever else the spawn does.
+ */
+
+import {
+  AGENT_LAUNCH_PANE_REFUSED_CODE,
+  type AgentLaunchPaneAddress,
+  type AgentLaunchPaneVerdict
+} from '../../../../shared/agent-launch-pane-verdict'
+import { AgentLaunchTabClosedError } from '../../../../shared/agent-launch-tab-closed'
+import type { RunningAgentLaunchPane } from '../../../agent-launch/agent-launch-pane-attachment'
+import type { OrcaRuntimeService } from '../../../runtime/orca-runtime'
+import { agentLaunchFailureCode } from '../../../runtime/rpc/methods/agent-launch-failure-code'
+import type { PtyIpcSpawnState } from './spawn-state'
+
+export type PaneAgentLaunch = {
+  runtime: OrcaRuntimeService
+  address: AgentLaunchPaneAddress
+  paneKey: string
+  /** The pane's tab shows a failed launch's notice; otherwise the spawn fails with its own error. */
+  notice: boolean
+  running: RunningAgentLaunchPane
+  /** The provider was asked for the process: a failure after this proves nothing ran. */
+  dispatched: boolean
+  /** Right before the provider spawn: refuses a launch whose pane the user closed meanwhile. */
+  refuseIfClosed: () => void
+}
+
+type PaneAgentLaunchEnd =
+  | { started: true }
+  /** The agent's process started, then exited before it registered. */
+  | { exitedDuringStart: true }
+  | { error: unknown }
+
+function finish(launch: PaneAgentLaunch, verdict: AgentLaunchPaneVerdict): void {
+  // A pane that shows no notice is an ordinary one whatever happened: its spawn reports its error.
+  const final = launch.notice ? verdict : { kind: 'proceed' as const }
+  launch.running.finish(final)
+  if (launch.notice) {
+    launch.runtime.reportAgentLaunchPaneVerdict(launch.address, final)
+  }
+}
+
+/** Ends the pane's launch, once; returns the error its spawn throws, if it failed. */
+export function endPaneAgentLaunch(ctx: PtyIpcSpawnState, end: PaneAgentLaunchEnd): Error | null {
+  const launch = ctx.paneAgentLaunch
+  ctx.paneAgentLaunch = null
+  if (!launch) {
+    return null
+  }
+  if ('exitedDuringStart' in end) {
+    finish(launch, { kind: 'not-started', code: 'agent_session_exited_during_start' })
+    return null
+  }
+  const closed = launch.running.closedByUser()
+  if ('started' in end) {
+    if (closed) {
+      stopClosed(launch)
+    } else {
+      finish(launch, { kind: 'proceed' })
+    }
+    return null
+  }
+  if (closed || end.error instanceof AgentLaunchTabClosedError) {
+    stopClosed(launch)
+    return toError(end.error)
+  }
+  finish(
+    launch,
+    // The provider may have started it before its answer was lost.
+    launch.dispatched
+      ? { kind: 'unconfirmed' }
+      : { kind: 'not-started', code: agentLaunchFailureCode(end.error) }
+  )
+  return launch.notice ? new Error(AGENT_LAUNCH_PANE_REFUSED_CODE) : toError(end.error)
+}
+
+/** The user closed it while it started: its agent, if one spawned, stops, as a closed tab's does. */
+function stopClosed(launch: PaneAgentLaunch): void {
+  const handle = launch.runtime.getTerminalHandleForPaneKey(launch.paneKey)
+  if (handle) {
+    void launch.runtime.closeTerminal(handle).catch(() => {})
+  }
+  launch.running.finish({ kind: 'withdrawn' })
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
+}

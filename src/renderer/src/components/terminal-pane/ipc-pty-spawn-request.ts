@@ -1,14 +1,40 @@
 import type { IpcPtyTransportOptions, PtyConnectResult, PtyTransport } from './pty-transport-types'
-import type { RuntimeCreateAgentSessionResult } from '../../../../shared/agent-session-host-authority'
-import {
-  createAgentSessionCreateOperation,
-  type AgentSessionCreateOperation
-} from '../../runtime/agent-session-create-operation'
-import { callRuntimeRpc } from '../../runtime/runtime-rpc-client'
+import type { AgentPaneLaunchRequest } from '../../../../shared/agent-pane-launch-request'
 import { toRuntimeTerminalWorktreeSelector } from '../../runtime/runtime-worktree-selector'
 
 type PtyConnectOptions = Parameters<PtyTransport['connect']>[0]
-const modelLaunchOperations = new WeakMap<IpcPtyTransportOptions, AgentSessionCreateOperation>()
+
+/** An OpenCode tab with a picked model starts from the host's plan in this pane's own spawn; its
+ *  prompt keeps its submit or draft. */
+function openCodeModelLaunch(
+  transportOptions: IpcPtyTransportOptions
+): AgentPaneLaunchRequest | undefined {
+  const preferences = Object.entries(transportOptions.agentLaunchPreferences ?? {}).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined
+  )
+  if (transportOptions.launchAgent !== 'opencode' || preferences.length === 0) {
+    return undefined
+  }
+  const { worktreeId, tabId, leafId, connectionId, resumeProviderSession, cwd } = transportOptions
+  if (!worktreeId || !tabId || !leafId || connectionId || resumeProviderSession) {
+    throw new Error('capability_unsupported')
+  }
+  return {
+    launch: {
+      agent: 'opencode',
+      target: { kind: 'existing', worktree: toRuntimeTerminalWorktreeSelector(worktreeId) },
+      prompt: {
+        text: transportOptions.agentPrompt ?? '',
+        delivery: transportOptions.agentPromptDelivery === 'draft' ? 'draft' : 'submit'
+      },
+      sessionOptions: Object.fromEntries(preferences),
+      ...(transportOptions.agentArgsOverride !== undefined
+        ? { agentArgs: transportOptions.agentArgsOverride }
+        : {}),
+      ...(cwd ? { cwd } : {})
+    }
+  }
+}
 
 /** `incarnationId` names which lifetime of the returned id this spawn owns; absent when the
  *  execution host predates the field. It is deliberately NOT on `PtyConnectResult` — only the
@@ -23,52 +49,9 @@ export async function spawnIpcPty(
   connectOptions: PtyConnectOptions,
   admittedSessionId?: string
 ): Promise<IpcPtySpawnResponse> {
-  if (
-    !admittedSessionId &&
-    transportOptions.launchAgent === 'opencode' &&
-    Object.values(transportOptions.agentLaunchPreferences ?? {}).some(
-      (value) => value !== undefined
-    )
-  ) {
-    const { worktreeId, tabId, leafId, connectionId, resumeProviderSession } = transportOptions
-    if (!worktreeId || !tabId || !leafId || connectionId || resumeProviderSession) {
-      throw new Error('capability_unsupported')
-    }
-    let operation = modelLaunchOperations.get(transportOptions)
-    if (!operation) {
-      operation = createAgentSessionCreateOperation()
-      modelLaunchOperations.set(transportOptions, operation)
-    }
-    const created = await operation.run((clientOperationId) =>
-      callRuntimeRpc<RuntimeCreateAgentSessionResult>(
-        { kind: 'local' },
-        'terminal.createAgentSession',
-        {
-          clientOperationId,
-          worktree: toRuntimeTerminalWorktreeSelector(worktreeId),
-          agent: 'opencode',
-          prompt: transportOptions.agentPrompt,
-          promptDelivery: transportOptions.agentPromptDelivery,
-          agentArgs: transportOptions.agentArgsOverride,
-          launchPreferences: transportOptions.agentLaunchPreferences,
-          startupCwd: transportOptions.cwd,
-          placement: { tabId, leafId },
-          presentation: 'background',
-          ...(transportOptions.terminalKittyKeyboardProtocol === true
-            ? { terminalKittyKeyboardProtocol: true }
-            : {})
-        }
-      )
-    )
-    if (!created.terminal.ptyId) {
-      throw new Error('agent_session_operation_unknown')
-    }
-    return spawnIpcPty(
-      { ...transportOptions, command: undefined, launchConfig: undefined },
-      { ...connectOptions, command: undefined, launchConfig: undefined },
-      created.terminal.ptyId
-    )
-  }
+  const agentLaunch = admittedSessionId
+    ? undefined
+    : (transportOptions.agentLaunch ?? openCodeModelLaunch(transportOptions))
   const {
     cwd,
     cwdFallback,
@@ -142,6 +125,7 @@ export async function spawnIpcPty(
     ...(projectRuntime ? { projectRuntime } : {}),
     ...(terminalColorQueryReplies ? { terminalColorQueryReplies } : {}),
     ...(terminalKittyKeyboardProtocol === true ? { terminalKittyKeyboardProtocol: true } : {}),
-    ...(telemetry ? { telemetry } : {})
+    ...(telemetry ? { telemetry } : {}),
+    ...(agentLaunch ? { agentLaunch } : {})
   })
 }

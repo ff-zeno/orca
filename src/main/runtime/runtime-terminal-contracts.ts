@@ -57,6 +57,9 @@ export type TerminalCreateOptions = {
   startupPrompt?: string
   /** Main-internal: whether `startupPrompt` rode the launch command. Called once the plan is built. */
   onStartupPromptCarry?: (carried: boolean) => void
+  /** Main-internal: the launch command must carry `startupPrompt` this way, submitted or as an
+   *  editable draft, or the plan is refused; absent offers it to the typed line as above. */
+  startupPromptDelivery?: 'auto-submit' | 'draft'
   /**
    * Replaces the Settings launch arguments for this `startupAgent` only; `null` means none at all.
    *
