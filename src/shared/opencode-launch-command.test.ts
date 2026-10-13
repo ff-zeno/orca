@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { isOpenCode2LaunchCommand, selectOpenCodeHookAgent } from './opencode-launch-command'
+import {
+  assertOpenCodeCopyUsesLocalStore,
+  isOpenCode2LaunchCommand,
+  selectOpenCodeHookAgent
+} from './opencode-launch-command'
 
 describe('isOpenCode2LaunchCommand', () => {
   it.each(['opencode2', '/usr/local/bin/opencode2', 'opencode2.exe', 'opencode2.cmd'])(
@@ -27,5 +31,22 @@ describe('OpenCode hook selection', () => {
     expect(
       selectOpenCodeHookAgent('opencode2', 'my-wrapper', (agent) => agent === 'opencode2')
     ).toBe('opencode2')
+  })
+})
+
+describe('OpenCode host-local copy launch', () => {
+  it.each(
+    [['--server', 'http://synthetic-server'], ['--server=http://synthetic-server']].map((args) => ({
+      args
+    }))
+  )('refuses an explicit server route before a copy', ({ args }) => {
+    expect(() => assertOpenCodeCopyUsesLocalStore(args)).toThrow('Remove --server')
+  })
+  it.each(
+    [[], ['--standalone'], ['--', '--server'], ['--prompt=explain --server']].map((args) => ({
+      args
+    }))
+  )('keeps ordinary local and positional argument meanings', ({ args }) => {
+    expect(() => assertOpenCodeCopyUsesLocalStore(args)).not.toThrow()
   })
 })
